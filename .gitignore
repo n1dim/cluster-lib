@@ -1,0 +1,5 @@
+worker_app
+control_app
+libcluster.a
+src/*.o
+docs/
