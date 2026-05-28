@@ -46,11 +46,10 @@ static void abort_all(ClusterControl *ctrl)
 }
 
 // распределяет задачи и собирает результаты
-static bool distribute_and_collect(ClusterControl *ctrl,
-                                    double          a,
-                                    double          b,
-                                    uint64_t        num_intervals,
-                                    double         *out_sum)
+static bool distribute_and_collect(ClusterControl      *ctrl,
+                                    uint64_t             n,
+                                    cluster_combine_fn_t combine,
+                                    double              *out_result)
 {
     // индексы активных воркеров
     int active[MAX_WORKERS];
@@ -61,20 +60,13 @@ static bool distribute_and_collect(ClusterControl *ctrl,
     }
     if (nw == 0) { fprintf(stderr, "[control] No active workers\n"); return false; }
 
-    double   width    = (b - a) / (double)nw;
-    uint64_t n_each   = num_intervals / (uint64_t)nw;
-    if (n_each == 0) n_each = 1;
-
-    // отправление задач
+    // каждому воркеру отправляем его индекс и общее число воркеров
     for (int i = 0; i < nw; i++) {
-        double ra = a + i * width;
-        double rb = (i == nw - 1) ? b : ra + width;
-
         TaskMsg task = {
-            .tag           = MSG_TASK,
-            .range_start   = ra,
-            .range_end     = rb,
-            .num_intervals = n_each,
+            .tag   = MSG_TASK,
+            .idx   = i,
+            .total = nw,
+            .n     = n,
         };
 
         if (!send_all(ctrl->workers[active[i]].fd, &task, sizeof(task))) {
@@ -94,8 +86,8 @@ static bool distribute_and_collect(ClusterControl *ctrl,
         pfds[i].events = POLLIN | POLLHUP | POLLERR;
     }
 
-    int timeout_ms = (ctrl->timeout_sec > 0) ? ctrl->timeout_sec * 1000 : -1;
-    double sum = 0.0;
+    int    timeout_ms = (ctrl->timeout_sec > 0) ? ctrl->timeout_sec * 1000 : -1;
+    double partial[MAX_WORKERS];
 
     while (received < nw) {
         int ready = poll(pfds, (nfds_t)nw, timeout_ms);
@@ -152,13 +144,14 @@ static bool distribute_and_collect(ClusterControl *ctrl,
                 return false;
             }
 
-            sum += rmsg.result;
-            got[i] = true;
+            partial[i] = rmsg.result;
+            got[i]     = true;
             received++;
         }
     }
 
-    *out_sum = sum;
+    // объединение результатов
+    *out_result = combine(partial, nw);
     return true;
 }
 
@@ -252,22 +245,20 @@ static double elapsed_sec(struct timespec start)
          + (double)(now.tv_nsec - start.tv_nsec) * 1e-9;
 }
 
-double cluster_control_compute_integral(ClusterControl *ctrl,
-                                         double          a,
-                                         double          b,
-                                         double          epsilon,
-                                        uint64_t        num_intervals_init)
+double cluster_control_compute(ClusterControl      *ctrl,
+                                double               epsilon,
+                                uint64_t             n_init,
+                                cluster_combine_fn_t combine)
 {
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    uint64_t n   = num_intervals_init;
+    uint64_t n   = n_init;
     double   r1  = 0.0, r2 = 0.0;
 
-    if (!distribute_and_collect(ctrl, a, b, n, &r1)) return (double)NAN;
+    if (!distribute_and_collect(ctrl, n, combine, &r1)) return (double)NAN;
     fprintf(stderr, "[control] n=%-12lu  result=%.10f\n", (unsigned long)n, r1);
 
-    // перебираем n, пока sum на предыдущей итерации не будет равна сумме на текущей итерации
     for (int iter = 0; iter < 60; iter++) {
         if (ctrl->timeout_sec > 0 && elapsed_sec(start) >= ctrl->timeout_sec) {
             fprintf(stderr, "[control] Computation timeout after %.1f s\n",
@@ -277,7 +268,7 @@ double cluster_control_compute_integral(ClusterControl *ctrl,
         }
 
         n *= 2;
-        if (!distribute_and_collect(ctrl, a, b, n, &r2)) return (double)NAN;
+        if (!distribute_and_collect(ctrl, n, combine, &r2)) return (double)NAN;
 
         fprintf(stderr, "[control] n=%-12lu  result=%.10f  Δ=%.2e\n",
                 (unsigned long)n, r2, fabs(r2 - r1));

@@ -10,12 +10,21 @@
 #include "../include/cluster.h"
 
 // Usage:
-//   control_app <num_workers_required> <timeout_sec> <host:port> [<host:port> …]
+//   control_app <num_workers_required> <timeout_sec> <host:port> [<host:port> …] [n0]
 //
-// Example (two workers on localhost):
+// n0 — начальное число шагов (по умолчанию 1000, для бенчмарка используйте 500000000)
+//
+// Example:
 //   control_app 2 60 127.0.0.1:9001 127.0.0.1:9002
-//
-// The program computes  int (4/(1+x^2) dx)  which equals pi.
+//   control_app 1 60 127.0.0.1:9001 500000000
+
+// Для интеграла: итоговый результат — сумма частичных.
+static double combine_sum(const double *results, int count)
+{
+    double s = 0.0;
+    for (int i = 0; i < count; i++) s += results[i];
+    return s;
+}
 
 int main(int argc, char *argv[])
 {
@@ -32,7 +41,11 @@ int main(int argc, char *argv[])
     ClusterControl *ctrl = cluster_control_create(num_required, timeout);
     if (!ctrl) return EXIT_FAILURE;
 
-    for (int i = 3; i < argc; i++) {
+    int last_worker = argc - 1;
+    if (last_worker >= 4 && !strchr(argv[last_worker], ':'))
+        last_worker--;  // последний аргумент — n0, не адрес воркера
+
+    for (int i = 3; i <= last_worker; i++) {
         char worker_host[64] = {0};
         int  worker_port     = 0;
         if (sscanf(argv[i], "%63[^:]:%d", worker_host, &worker_port) != 2) {
@@ -51,16 +64,15 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // вычисления
-    const double A       = 0.0;
-    const double B       = 1.0;
     const double EPSILON = 1e-9;
-    const uint64_t N0    = 1000ULL;
+    uint64_t steps = (last_worker < argc - 1)
+                     ? (uint64_t)atoll(argv[argc - 1])
+                     : 1000ULL;
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    double result = cluster_control_compute_integral(ctrl, A, B, EPSILON, N0);
+    double result = cluster_control_compute(ctrl, EPSILON, steps, combine_sum);
 
     clock_gettime(CLOCK_MONOTONIC, &t1);
 
@@ -75,9 +87,9 @@ int main(int argc, char *argv[])
 
     printf("\n");
     printf("Integral  = %.15f\n", result);
-    printf("pi         = %.15f\n", M_PI);
+    printf("pi        = %.15f\n", M_PI);
     printf("Error     = %.2e\n",  fabs(result - M_PI));
-    printf("Time   = %.3f s\n", elapsed);
+    printf("Time      = %.3f s\n", elapsed);
 
     cluster_control_destroy(ctrl);
     return EXIT_SUCCESS;

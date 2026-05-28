@@ -14,11 +14,12 @@ typedef enum {
 
 typedef struct {
     uint8_t  tag;           // MSG_TASK
-    uint8_t  _pad[7];       // выравниваем сами
-    double   range_start;
-    double   range_end;
-    uint64_t num_intervals;
-} TaskMsg;                  // 32 bytes
+    uint8_t  _pad[3];       // выравниваем сами
+    int32_t  idx;           // индекс этого воркера
+    int32_t  total;         // всего воркеров в итерации
+    uint8_t  _pad2[4];
+    uint64_t n;             // суммарное количество шагов
+} TaskMsg;                  // 24 bytes
 
 typedef struct {
     uint8_t  tag;           // MSG_RESULT
